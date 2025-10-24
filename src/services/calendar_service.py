@@ -66,3 +66,49 @@ class CalendarService:
             busyness_data['message'] = f"Your schedule is {density_pct:.0f}% booked."
         
         return busyness_data
+
+    async def find_available_slots(
+        self,
+        user_id: str,
+        calendar_ids: List[str],
+        duration_minutes: int,
+        work_hours: Dict[str, str],
+        days_ahead: int = 7
+    ) -> List[Dict[str, str]]:
+        """Find available time slots for scheduling."""
+        from src.tools import calendar_tools, rescheduling_tools
+
+        credentials = await self.creds_manager.get_credentials(user_id)
+        time_min = datetime.now().isoformat() + 'Z'
+        time_max = (datetime.now() + timedelta(days=days_ahead)).isoformat() + 'Z'
+
+        # Get free/busy data
+        free_busy_data = calendar_tools.get_free_busy(
+            credentials, calendar_ids, time_min, time_max
+        )
+
+        # Find available slots
+        slots = rescheduling_tools.find_available_slots(
+            free_busy_data, duration_minutes, time_min, time_max, work_hours
+        )
+
+        return slots
+
+    async def create_event(
+        self,
+        user_id: str,
+        calendar_id: str,
+        summary: str,
+        start_time: str,
+        end_time: str,
+        attendees: List[str] = None,
+        description: str = ""
+    ) -> Dict[str, Any]:
+        """Create a new calendar event."""
+        from src.tools import calendar_tools
+
+        credentials = await self.creds_manager.get_credentials(user_id)
+
+        return calendar_tools.create_calendar_event(
+            credentials, calendar_id, summary, start_time, end_time, attendees, description
+        )
