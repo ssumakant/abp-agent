@@ -20,11 +20,13 @@ class CalendarService:
     ) -> List[Dict[str, Any]]:
         """Get events from all user calendars."""
         from src.tools import calendar_tools
-        
+        from googleapiclient.errors import HttpError
+        from src.exceptions import CalendarAPIError
+
         credentials = await self.creds_manager.get_credentials(user_id)
         time_min = datetime.now().isoformat() + 'Z'
         time_max = (datetime.now() + timedelta(days=days_ahead)).isoformat() + 'Z'
-        
+
         all_events = []
         for calendar_id in calendar_ids:
             try:
@@ -32,9 +34,19 @@ class CalendarService:
                     credentials, calendar_id, time_min, time_max
                 )
                 all_events.extend(events)
-            except Exception as e:
+            except HttpError as e:
+                if e.resp.status == 404:
+                    logger.error(f"Calendar not found: {calendar_id}")
+                    raise CalendarAPIError(
+                        f"Google Calendar not found for {calendar_id}. "
+                        "Please ensure the calendar exists and is accessible."
+                    )
                 logger.error(f"Failed to fetch calendar {calendar_id}: {e}")
-        
+                raise CalendarAPIError(f"Failed to access Google Calendar: {str(e)}")
+            except Exception as e:
+                logger.error(f"Unexpected error fetching calendar {calendar_id}: {e}")
+                raise CalendarAPIError(f"Calendar access error: {str(e)}")
+
         return all_events
     
     async def calculate_schedule_density(
