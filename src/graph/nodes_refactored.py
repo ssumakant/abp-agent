@@ -141,10 +141,10 @@ def check_meeting_against_constitution(state: AgentState) -> AgentState:
     SINGLE RESPONSIBILITY: Rule enforcement only.
     """
     user_id = state['user_id']
-    meeting = state.get('new_meeting', {})
+    meeting = state.get('new_meeting') or {}
     constitution = state['user_context']['constitution']
-    
-    proposed_time = meeting.get('proposed_time')
+
+    proposed_time = meeting.get('proposed_time') if meeting else None
     if not proposed_time:
         state['requires_approval'] = False
         return state
@@ -189,7 +189,7 @@ async def find_and_book_slot(state: AgentState) -> AgentState:
     SINGLE RESPONSIBILITY: Slot finding and booking only.
     """
     user_id = state['user_id']
-    meeting = state.get('new_meeting', {})
+    meeting = state.get('new_meeting') or {}
     user_context = state['user_context']
     constitution = user_context['constitution']
     
