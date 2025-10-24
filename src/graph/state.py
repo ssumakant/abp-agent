@@ -20,6 +20,6 @@ class AgentState(TypedDict):
     approval_type: Optional[str]
     approval_data: Optional[Dict[str, Any]]
     new_meeting: Optional[Dict[str, Any]]
-    final_response: Annotated[str, operator.add]
+    final_response: str
     error: Optional[str]
     messages: Annotated[List[Dict[str, str]], operator.add]

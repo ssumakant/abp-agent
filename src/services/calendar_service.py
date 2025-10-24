@@ -77,8 +77,14 @@ class CalendarService:
     ) -> List[Dict[str, str]]:
         """Find available time slots for scheduling."""
         from src.tools import calendar_tools, rescheduling_tools
+        from src.exceptions import AuthenticationError
 
-        credentials = await self.creds_manager.get_credentials(user_id)
+        try:
+            credentials = await self.creds_manager.get_credentials(user_id)
+        except Exception as e:
+            logger.error(f"Failed to get credentials for user {user_id}: {e}")
+            raise AuthenticationError("Google Calendar not connected. Please authorize calendar access.")
+
         time_min = datetime.now().isoformat() + 'Z'
         time_max = (datetime.now() + timedelta(days=days_ahead)).isoformat() + 'Z'
 
