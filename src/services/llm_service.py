@@ -39,9 +39,15 @@ Respond with JSON: {{"intent": "intent_name", "entities": {{}}, "confidence": 0.
                 SystemMessage(content=system_prompt),
                 HumanMessage(content=user_request)
             ])
+            if not response or not response.content:
+                logger.warning("LLM returned empty response, using fallback")
+                return self._fallback_intent_detection(user_request)
             return json.loads(response.content)
+        except json.JSONDecodeError as e:
+            logger.warning(f"LLM returned invalid JSON: {e}, using fallback")
+            return self._fallback_intent_detection(user_request)
         except Exception as e:
-            logger.error(f"LLM failed: {e}")
+            logger.error(f"LLM invoke failed: {e}, using fallback")
             return self._fallback_intent_detection(user_request)
     
     def _fallback_intent_detection(self, request: str) -> Dict[str, Any]:
@@ -52,7 +58,7 @@ Respond with JSON: {{"intent": "intent_name", "entities": {{}}, "confidence": 0.
             intent = 'reschedule_meeting'
         elif any(word in request_lower for word in ['book', 'schedule', 'create']):
             intent = 'schedule_meeting'
-        elif any(word in request_lower for word in ['free', 'available', 'when']):
+        elif any(word in request_lower for word in ['free', 'available', 'when', 'calendar', 'tomorrow', 'today', 'schedule', 'what', 'meetings']):
             intent = 'check_availability'
         elif any(word in request_lower for word in ['busy', 'how is']):
             intent = 'assess_busyness'

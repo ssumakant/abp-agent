@@ -2,7 +2,7 @@
 Refactored LangGraph workflow with dependency injection.
 """
 from langgraph.graph import StateGraph, END
-from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.checkpoint.memory import MemorySaver
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.graph.state import AgentState
@@ -113,7 +113,7 @@ def create_agent_graph(session: AsyncSession):
     workflow.add_edge("return_response", END)
     
     # Add persistence with checkpoint
-    memory = SqliteSaver.from_conn_string(":memory:")
+    memory = MemorySaver()
     
     # Compile with human-in-the-loop interrupts
     app = workflow.compile(
@@ -127,7 +127,7 @@ def create_agent_graph(session: AsyncSession):
 # Conditional routing functions
 def _route_after_intent(state: AgentState) -> str:
     """Route based on determined intent."""
-    from src.config.constants import (
+    from src.configuration.constants import (
         INTENT_SCHEDULE_MEETING,
         INTENT_RESCHEDULE_MEETING,
         INTENT_CHECK_AVAILABILITY,
@@ -148,7 +148,7 @@ def _route_after_intent(state: AgentState) -> str:
 
 def _route_after_busyness_check(state: AgentState) -> str:
     """Route after busyness assessment."""
-    from src.config.constants import (
+    from src.configuration.constants import (
         INTENT_ASSESS_BUSYNESS,
         INTENT_CHECK_AVAILABILITY,
         INTENT_SCHEDULE_MEETING

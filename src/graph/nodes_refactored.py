@@ -18,7 +18,7 @@ from src.exceptions import (
     LLMError,
     ReschedulingError
 )
-from src.config.constants import (
+from src.configuration.constants import (
     MSG_CALENDAR_ACCESS_FAILED,
     MSG_NO_MEETINGS_FOUND,
     MSG_UNEXPECTED_ERROR,
@@ -74,17 +74,17 @@ def determine_intent(state: AgentState) -> AgentState:
             constitution=state['user_context']['constitution']
         )
         
-        state['intent'] = result['intent']
+        state['intent'] = result.get('intent', 'unknown') if result else 'unknown'
         
-        if result.get('entities'):
+        if result and result.get('entities'):
             state['new_meeting'] = result['entities']
         
         state['messages'].append({
             'role': 'assistant',
-            'content': f"Intent: {result['intent']}"
+            'content': f"Intent: {state['intent']}"
         })
         
-        logger.info(f"Intent determined: {result['intent']}", extra={'user_id': user_id})
+        logger.info(f"Intent determined: {state['intent']}", extra={'user_id': user_id})
         
     except LLMError as e:
         logger.error(f"Intent detection failed: {e.message}", extra={'user_id': user_id})

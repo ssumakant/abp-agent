@@ -7,6 +7,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import uuid
 import logging
 
+# ... keep your existing imports, and add these:
+from datetime import datetime, timedelta
+from fastapi import status, Depends
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+from src.schemas import Token, UserCreateRequest, AgentInvokeRequest, TokenData  # We importing from the newly created schemas file
+
+
 from src.config import settings
 from src.database import init_db, get_session
 from src.database.models import User
@@ -15,6 +24,52 @@ from src.graph.state import AgentState
 from src.tools.constitution_tools import get_default_constitution
 from src.exceptions import ABPException
 from sqlalchemy import select
+
+# Security configuration
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+# --- Authentication Utility Functions ---
+def verify_password(plain_password, hashed_password):
+    return pwd_context.verify(plain_password, hashed_password)
+
+def get_password_hash(password):
+    return pwd_context.hash(password)
+
+def create_access_token(data: dict, expires_delta: timedelta | None = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=15)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, settings.secret_key, algorithm=settings.algorithm)
+    return encoded_jwt
+
+async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncSession = Depends(get_session)):
+    """
+    Decode JWT token to get the current user. This is our security check.
+    """
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
+        email: str = payload.get("sub")
+        if email is None:
+            raise credentials_exception
+        token_data = TokenData(email=email)
+    except JWTError:
+        raise credentials_exception
+
+    result = await db.execute(select(User).where(User.email == token_data.email))
+    user = result.scalar_one_or_none()
+
+    if user is None:
+        raise credentials_exception
+    return user
 
 # Setup logging
 logging.basicConfig(
@@ -40,14 +95,6 @@ app.add_middleware(
 )
 
 
-@app.on_event("startup")
-async def startup_event():
-    """Initialize database and graph on startup."""
-    await init_db()
-    logger.info("✓ Database initialized")
-    logger.info("✓ Agent graph ready with service layer")
-
-
 # Request/Response models
 class AgentRequest(BaseModel):
     """Request to interact with the agent."""
@@ -71,13 +118,6 @@ class ApprovalRequest(BaseModel):
     thread_id: str
     approved: bool
     user_id: str
-
-
-class UserCreateRequest(BaseModel):
-    """Create a new user."""
-    email: str
-    internal_domain: str
-    timezone: str = "America/Los_Angeles"
 
 
 # Endpoints
@@ -120,8 +160,10 @@ async def create_user(
         if existing_user:
             raise HTTPException(status_code=400, detail="User already exists")
         
+        hashed_password = get_password_hash(request.password) # Add this
         new_user = User(
             email=request.email,
+            hashed_password=hashed_password, # Add this
             internal_domain=request.internal_domain,
             timezone=request.timezone
         )
@@ -166,6 +208,25 @@ async def get_user(
         "timezone": user.timezone
     }
 
+@app.post("/token", response_model=Token)
+async def login_for_access_token(
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: AsyncSession = Depends(get_session)
+):
+    result = await db.execute(select(User).where(User.email == form_data.username))
+    user = result.scalar_one_or_none()
+    if not user or not verify_password(form_data.password, user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    access_token_expires = timedelta(minutes=settings.access_token_expire_minutes)
+    access_token = create_access_token(
+        data={"sub": user.email}, expires_delta=access_token_expires
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
+
 
 @app.post("/agent/query", response_model=AgentResponse)
 async def agent_query(
@@ -195,10 +256,7 @@ async def agent_query(
             "constitution": get_default_constitution(),
             "user_name": user.email.split('@')[0].title()
         }
-        
-        # Initialize graph with current session
-        graph = initialize_graph(session)
-        
+                
         # Create or reuse thread ID
         thread_id = request.thread_id or str(uuid.uuid4())
         config = {"configurable": {"thread_id": thread_id}}
@@ -292,8 +350,6 @@ async def approve_action(
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
-        # Initialize graph
-        graph = initialize_graph(session)
         config = {"configurable": {"thread_id": request.thread_id}}
         
         if request.approved:
@@ -328,25 +384,73 @@ async def approve_action(
         logger.exception("Approval handling failed")
         raise HTTPException(status_code=500, detail="Approval error")
 
-
-@app.get("/auth/google")
-async def google_auth_redirect(
-    user_id: str,
+@app.post("/agent/invoke")
+async def agent_invoke(
+    request: AgentInvokeRequest,
+    current_user: User = Depends(get_current_user), # Security is handled here
     session: AsyncSession = Depends(get_session)
 ):
-    """Initiate Google OAuth flow."""
-    from src.auth.credentials_manager import CredentialsManager
-    
-    creds_manager = CredentialsManager(session)
-    auth_url, state = creds_manager.get_authorization_url(state=user_id)
-    
-    logger.info(f"OAuth initiated for user {user_id}")
-    
-    return {
-        "authorization_url": auth_url,
-        "state": state
-    }
+    """
+    Invoke the agent with a user query, now with a fully prepared context.
+    """
+    try:
+        # Build a new graph for each request to ensure a fresh state
+        graph = initialize_graph(session)
 
+        # The user_id is now securely taken from the authenticated user
+        user_id = current_user.user_id
+        config = {"configurable": {"thread_id": user_id}}
+
+        # Assemble the complete user_context, as per Claude's brilliant suggestion
+        user_context = {
+            "user_email": current_user.email,
+            "internal_domain": current_user.internal_domain,
+            "timezone": current_user.timezone,
+            "calendars": [current_user.email],
+            "constitution": get_default_constitution(),
+            "user_name": current_user.email.split('@')[0].title()
+        }
+
+        # This is the final, correct initialization of the agent's state
+        input_data = {
+            "original_request": request.query,
+            "user_id": user_id,
+            "user_context": user_context, # The fully populated context
+            "intent": None,
+            "is_busy": None,
+            "density_percentage": None,
+            "busy_message": None,
+            "candidate_meetings": [],
+            "chosen_meeting": None,
+            "proposed_new_time": None,
+            "drafted_email": None,
+            "requires_approval": False,
+            "approval_type": None,
+            "approval_data": None,
+            "new_meeting": None,
+            "final_response": "",
+            "error": None,
+            "messages": []
+        }
+
+        # Invoke the agent's brain
+        response_state = await graph.ainvoke(input_data, config=config)
+
+        # Extract response from final_response field
+        response_text = response_state.get(
+            "final_response",
+            "I encountered an error processing your request."
+        )
+        
+        # Check for errors
+        if response_state.get("error"):
+            response_text = f"❌ {response_state['error']}"
+        
+        return {"response": response_text}
+
+    except Exception as e:
+        logger.error(f"Agent invocation failed for user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/auth/callback")
 async def google_auth_callback(

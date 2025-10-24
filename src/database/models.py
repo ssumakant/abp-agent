@@ -18,6 +18,10 @@ class User(Base):
     
     user_id = Column(String, primary_key=True, default=generate_uuid)
     email = Column(String, unique=True, nullable=False, index=True)
+
+    # Missing line added
+    hashed_password = Column(String, nullable=False)
+    
     timezone = Column(String, default="America/Los_Angeles")
     internal_domain = Column(String, nullable=False)  # e.g., "octifai.com"
     created_at = Column(DateTime, default=datetime.utcnow)
