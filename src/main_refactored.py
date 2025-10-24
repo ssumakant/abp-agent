@@ -436,16 +436,21 @@ async def agent_invoke(
         # Invoke the agent's brain
         response_state = await graph.ainvoke(input_data, config=config)
 
+        # Safety check
+        if not response_state:
+            logger.error("Graph returned None response")
+            raise HTTPException(status_code=500, detail="Graph execution failed")
+
         # Extract response from final_response field
         response_text = response_state.get(
             "final_response",
             "I encountered an error processing your request."
         )
-        
+
         # Check for errors
         if response_state.get("error"):
             response_text = f"❌ {response_state['error']}"
-        
+
         return {"response": response_text}
 
     except Exception as e:

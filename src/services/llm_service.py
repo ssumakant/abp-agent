@@ -42,7 +42,12 @@ Respond with JSON: {{"intent": "intent_name", "entities": {{}}, "confidence": 0.
             if not response or not response.content:
                 logger.warning("LLM returned empty response, using fallback")
                 return self._fallback_intent_detection(user_request)
-            return json.loads(response.content)
+
+            parsed = json.loads(response.content)
+            if not parsed or not isinstance(parsed, dict):
+                logger.warning(f"LLM returned invalid response: {parsed}, using fallback")
+                return self._fallback_intent_detection(user_request)
+            return parsed
         except json.JSONDecodeError as e:
             logger.warning(f"LLM returned invalid JSON: {e}, using fallback")
             return self._fallback_intent_detection(user_request)

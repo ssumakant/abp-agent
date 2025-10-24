@@ -85,12 +85,16 @@ def determine_intent(state: AgentState) -> AgentState:
         })
         
         logger.info(f"Intent determined: {state['intent']}", extra={'user_id': user_id})
-        
+
     except LLMError as e:
         logger.error(f"Intent detection failed: {e.message}", extra={'user_id': user_id})
         state['intent'] = 'unknown'
         state['error'] = "Could not understand your request. Please try rephrasing."
-    
+    except Exception as e:
+        logger.error(f"Unexpected error in intent detection: {e}", extra={'user_id': user_id})
+        state['intent'] = 'unknown'
+        state['error'] = "Could not understand your request. Please try rephrasing."
+
     return state
 
 
