@@ -1,16 +1,22 @@
-# Agentic Business Partner (ABP) v3.0.1
+# Agentic Business Partner (ABP) v3.1.0
 
 AI-powered executive scheduling assistant with LangGraph and Google Gemini.
 
-## Recent Updates (v3.0.1)
+## 🔥 Latest Updates (v3.1.0 - October 25, 2025)
 
-✅ **Fixed** - NoneType errors in intent detection
-✅ **Fixed** - Message duplication in responses
-✅ **Fixed** - Silent calendar API errors
-✅ **Enhanced** - Better error messages and fallback handling
-✅ **Added** - Complete CalendarService implementation
+### Critical Bug Fixes
+🐛 **Fixed** - NameError crash in `/agent/query` and `/agent/approve` endpoints
+🐛 **Fixed** - Stateful/stateless conflict breaking Human-in-the-Loop workflows
+✅ **Implemented** - Persistent checkpointing with AsyncSqliteSaver
+
+### New Features
+✨ **Added** - 5 new API endpoints for Settings & Account Management
+✨ **Added** - GET/POST `/api/v1/settings` for constitution management
+✨ **Added** - Google account management endpoints (list, connect, remove)
+✨ **Enhanced** - Database schema with account status tracking
 
 See [CHANGELOG.md](CHANGELOG.md) for detailed changes.
+See [v3.1.0 Release Notes](docs/v3.1.0_RELEASE_NOTES.md) for complete documentation.
 
 ## Features
 
@@ -39,6 +45,29 @@ uvicorn src.main_refactored:app --reload
 ```
 
 Visit http://localhost:8000/docs for API documentation.
+
+## API Endpoints
+
+### Agent Interaction
+- `POST /agent/query` - Main agent interaction (stateful, supports approval workflows)
+- `POST /agent/approve` - Approve/deny proposed actions
+- `POST /agent/invoke` - Simple queries (stateless, requires JWT)
+
+### Settings & Constitution
+- `GET /api/v1/settings` - Get user's scheduling rules (JWT required)
+- `POST /api/v1/settings` - Update scheduling preferences (JWT required)
+
+### Account Management
+- `GET /api/v1/auth/google/url` - Get OAuth URL for calendar connection (JWT required)
+- `GET /api/v1/auth/accounts` - List connected Google Calendar accounts (JWT required)
+- `DELETE /api/v1/auth/accounts/{id}` - Remove connected account (JWT required)
+
+### Authentication
+- `POST /users` - Create new user account
+- `POST /token` - Login and get JWT access token
+- `GET /auth/callback` - OAuth callback handler
+
+See [v3.1.0 Release Notes](docs/v3.1.0_RELEASE_NOTES.md#new-api-endpoints) for detailed endpoint documentation with request/response examples.
 
 ## Project Structure
 
