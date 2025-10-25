@@ -2,7 +2,7 @@
 Refactored LangGraph workflow with dependency injection.
 """
 from langgraph.graph import StateGraph, END
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.graph.state import AgentState
@@ -13,14 +13,29 @@ from src.services.llm_service import LLMService
 from src.services.email_service import EmailService
 from src.auth.credentials_manager import CredentialsManager
 
+# Module-level persistent checkpointer
+_checkpointer = None
 
-def create_agent_graph(session: AsyncSession):
+
+async def get_checkpointer():
+    """
+    Get or create the persistent checkpointer.
+    Uses AsyncSqliteSaver to persist checkpoints across requests.
+    This enables Human-in-the-Loop workflows with /agent/query + /agent/approve.
+    """
+    global _checkpointer
+    if _checkpointer is None:
+        _checkpointer = AsyncSqliteSaver.from_conn_string("checkpoints.db")
+    return _checkpointer
+
+
+async def create_agent_graph(session: AsyncSession):
     """
     Create the complete agent workflow graph with dependency injection.
-    
+
     Args:
         session: Database session for credentials management
-        
+
     Returns:
         Compiled LangGraph application
     """
@@ -111,16 +126,17 @@ def create_agent_graph(session: AsyncSession):
     workflow.add_edge("execute_reschedule", "return_response")
     workflow.add_edge("handle_unknown", "return_response")
     workflow.add_edge("return_response", END)
-    
-    # Add persistence with checkpoint
-    memory = MemorySaver()
-    
+
+    # Add persistence with persistent checkpoint (AsyncSqliteSaver)
+    # This ensures checkpoints survive across HTTP requests for Human-in-the-Loop
+    checkpointer = await get_checkpointer()
+
     # Compile with human-in-the-loop interrupts
     app = workflow.compile(
-        checkpointer=memory,
+        checkpointer=checkpointer,
         interrupt_before=["execute_reschedule"]
     )
-    
+
     return app
 
 
@@ -188,8 +204,14 @@ def _route_after_identify_meetings(state: AgentState) -> str:
 agent_graph = None
 
 
-def initialize_graph(session: AsyncSession):
-    """Initialize the graph with a database session."""
+async def initialize_graph(session: AsyncSession):
+    """
+    Initialize the graph with a database session.
+
+    Note: This creates a new graph instance but uses a shared persistent
+    checkpointer, allowing Human-in-the-Loop workflows to work correctly
+    across multiple HTTP requests.
+    """
     global agent_graph
-    agent_graph = create_agent_graph(session)
+    agent_graph = await create_agent_graph(session)
     return agent_graph

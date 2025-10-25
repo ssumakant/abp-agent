@@ -59,10 +59,11 @@ class SchedulingRule(Base):
 class OAuthToken(Base):
     """Encrypted OAuth tokens for calendar access."""
     __tablename__ = "oauth_tokens"
-    
+
     token_id = Column(String, primary_key=True, default=generate_uuid)
     user_id = Column(String, ForeignKey("users.user_id"), nullable=False)
     provider = Column(String, default="google")
+    account_email = Column(String, nullable=True)  # Email of the connected account
     access_token = Column(String, nullable=False)
     refresh_token = Column(String)
     token_uri = Column(String)
@@ -70,5 +71,8 @@ class OAuthToken(Base):
     client_secret = Column(String)
     scopes = Column(JSON)
     expiry = Column(DateTime)
-    
+    status = Column(String, default="active")  # active, expired, revoked, error
+    connected_at = Column(DateTime, default=datetime.utcnow)
+    is_primary = Column(Boolean, default=False)  # Is this the primary calendar account?
+
     user = relationship("User", back_populates="oauth_tokens")

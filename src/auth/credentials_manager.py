@@ -161,17 +161,84 @@ class CredentialsManager:
         
         # Save to database
         await self.save_credentials(user_id, creds)
-        
+
         return creds
+
+    async def list_connected_accounts(self, user_id: str) -> list[OAuthToken]:
+        """
+        List all connected Google Calendar accounts for a user.
+
+        Args:
+            user_id: The user's ID
+
+        Returns:
+            List of OAuthToken records
+        """
+        result = await self.session.execute(
+            select(OAuthToken).where(OAuthToken.user_id == user_id)
+        )
+        return result.scalars().all()
+
+    async def revoke_account(self, user_id: str, account_id: str) -> bool:
+        """
+        Revoke and delete a connected Google Calendar account.
+
+        Args:
+            user_id: The user's ID
+            account_id: The token_id to revoke
+
+        Returns:
+            True if successful, False if account not found
+
+        Raises:
+            ValueError: If trying to delete the only connected account
+        """
+        # Check total accounts
+        all_accounts = await self.list_connected_accounts(user_id)
+
+        if len(all_accounts) <= 1:
+            raise ValueError("Cannot delete the only connected account")
+
+        # Find the specific account
+        result = await self.session.execute(
+            select(OAuthToken).where(
+                OAuthToken.token_id == account_id,
+                OAuthToken.user_id == user_id
+            )
+        )
+        token_record = result.scalar_one_or_none()
+
+        if not token_record:
+            return False
+
+        # Revoke the token with Google (best effort)
+        try:
+            creds = Credentials(
+                token=token_record.access_token,
+                refresh_token=token_record.refresh_token,
+                token_uri=token_record.token_uri,
+                client_id=token_record.client_id,
+                client_secret=token_record.client_secret
+            )
+            creds.revoke(Request())
+        except Exception as e:
+            # Log but don't fail - we'll delete from DB anyway
+            print(f"Failed to revoke token with Google: {e}")
+
+        # Delete from database
+        await self.session.delete(token_record)
+        await self.session.commit()
+
+        return True
 
 
 def get_calendar_service(credentials: Credentials):
     """
     Build Google Calendar API service.
-    
+
     Args:
         credentials: Valid OAuth credentials
-        
+
     Returns:
         Google Calendar API service object
     """

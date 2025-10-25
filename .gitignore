@@ -33,6 +33,11 @@ ENV/
 *.sqlite
 *.sqlite3
 
+# LangGraph Checkpoints (v3.1.0+)
+checkpoints.db
+checkpoints.db-shm
+checkpoints.db-wal
+
 # Logs
 *.log
 logs/
