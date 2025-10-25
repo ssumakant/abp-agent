@@ -118,6 +118,7 @@ class ApprovalRequest(BaseModel):
     thread_id: str
     approved: bool
     user_id: str
+    edited_email_body: Optional[str] = None  # Allow users to edit email before sending
 
 
 # Endpoints
@@ -384,7 +385,7 @@ async def approve_action(
         logger.exception("Approval handling failed")
         raise HTTPException(status_code=500, detail="Approval error")
 
-@app.post("/agent/invoke")
+@app.post("/agent/invoke", response_model=AgentResponse)
 async def agent_invoke(
     request: AgentInvokeRequest,
     current_user: User = Depends(get_current_user), # Security is handled here
@@ -392,6 +393,7 @@ async def agent_invoke(
 ):
     """
     Invoke the agent with a user query, now with a fully prepared context.
+    Returns full AgentResponse with approval support for front-end.
     """
     try:
         # Build a new graph for each request to ensure a fresh state
@@ -399,7 +401,10 @@ async def agent_invoke(
 
         # The user_id is now securely taken from the authenticated user
         user_id = current_user.user_id
-        config = {"configurable": {"thread_id": user_id}}
+
+        # Create or retrieve thread_id for conversation continuity
+        thread_id = request.user_id or str(uuid.uuid4())
+        config = {"configurable": {"thread_id": thread_id}}
 
         # Assemble the complete user_context, as per Claude's brilliant suggestion
         user_context = {
@@ -451,7 +456,15 @@ async def agent_invoke(
         if response_state.get("error"):
             response_text = f"❌ {response_state['error']}"
 
-        return {"response": response_text}
+        # Return full AgentResponse for front-end approval flow support
+        return AgentResponse(
+            user_id=user_id,
+            response=response_text,
+            thread_id=thread_id,
+            requires_approval=response_state.get("requires_approval", False),
+            approval_type=response_state.get("approval_type"),
+            approval_data=response_state.get("approval_data")
+        )
 
     except Exception as e:
         logger.error(f"Agent invocation failed for user {user_id}: {e}")
