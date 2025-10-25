@@ -13,7 +13,12 @@ from fastapi import status, Depends
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-from src.schemas import Token, UserCreateRequest, AgentInvokeRequest, TokenData  # We importing from the newly created schemas file
+from src.schemas import (
+    Token, UserCreateRequest, AgentInvokeRequest, TokenData,
+    Settings, SettingsUpdateRequest, SettingsUpdateResponse,
+    GoogleAuthUrlResponse, ConnectedAccount, ConnectedAccountsResponse, AccountDeleteResponse,
+    WorkHours, ProtectedTimeBlock, SchedulingRules
+)  # We importing from the newly created schemas file
 
 
 from src.config import settings
@@ -236,18 +241,21 @@ async def agent_query(
 ):
     """
     Main endpoint for interacting with the agent.
-    Uses refactored service layer for clean separation of concerns.
+    Uses stateful graph with persistent checkpointing for Human-in-the-Loop workflows.
     """
     try:
+        # Initialize graph with persistent checkpointer
+        graph = await initialize_graph(session)
+
         # Load user from database
         result = await session.execute(
             select(User).where(User.user_id == request.user_id)
         )
         user = result.scalar_one_or_none()
-        
+
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
-        
+
         # Build user context
         user_context = {
             "user_email": user.email,
@@ -257,11 +265,11 @@ async def agent_query(
             "constitution": get_default_constitution(),
             "user_name": user.email.split('@')[0].title()
         }
-                
+
         # Create or reuse thread ID
         thread_id = request.thread_id or str(uuid.uuid4())
         config = {"configurable": {"thread_id": thread_id}}
-        
+
         if not request.thread_id:
             # New conversation - create initial state
             initial_state = AgentState(
@@ -284,21 +292,21 @@ async def agent_query(
                 error=None,
                 messages=[]
             )
-            
+
             logger.info(
                 f"Processing new request from user {request.user_id}",
                 extra={'user_id': request.user_id}
             )
-            
-            # Invoke the agent graph
-            final_state = graph.invoke(initial_state, config=config)
+
+            # Invoke the agent graph (will save checkpoint if interrupted)
+            final_state = await graph.ainvoke(initial_state, config=config)
         else:
-            # Continue existing conversation
+            # Continue existing conversation from checkpoint
             logger.info(
                 f"Continuing conversation {thread_id}",
                 extra={'user_id': request.user_id}
             )
-            final_state = graph.invoke(None, config=config)
+            final_state = await graph.ainvoke(None, config=config)
         
         # Extract response
         response_text = final_state.get(
@@ -340,27 +348,31 @@ async def approve_action(
 ):
     """
     Handle user approval or denial of a proposed action.
+    Resumes execution from persistent checkpoint (saved by /agent/query).
     Implements PRD User Story 5.3 - explicit approval requirement.
     """
     try:
+        # Initialize graph with persistent checkpointer
+        graph = await initialize_graph(session)
+
         result = await session.execute(
             select(User).where(User.user_id == request.user_id)
         )
         user = result.scalar_one_or_none()
-        
+
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
-        
+
         config = {"configurable": {"thread_id": request.thread_id}}
-        
+
         if request.approved:
             logger.info(
                 f"User approved action for thread {request.thread_id}",
                 extra={'user_id': request.user_id}
             )
-            
-            # Continue execution from checkpoint
-            final_state = graph.invoke(None, config=config)
+
+            # Continue execution from checkpoint (resumes from where /agent/query paused)
+            final_state = await graph.ainvoke(None, config=config)
             response_text = final_state.get(
                 "final_response",
                 "Action completed successfully."
@@ -370,17 +382,17 @@ async def approve_action(
                 f"User denied action for thread {request.thread_id}",
                 extra={'user_id': request.user_id}
             )
-            
+
             response_text = "Action cancelled by user."
             final_state = {"final_response": response_text}
-        
+
         return AgentResponse(
             user_id=request.user_id,
             response=response_text,
             thread_id=request.thread_id,
             requires_approval=False
         )
-    
+
     except Exception as e:
         logger.exception("Approval handling failed")
         raise HTTPException(status_code=500, detail="Approval error")
@@ -394,10 +406,12 @@ async def agent_invoke(
     """
     Invoke the agent with a user query, now with a fully prepared context.
     Returns full AgentResponse with approval support for front-end.
+    This endpoint is stateless - suitable for simple queries that don't need approval.
+    For Human-in-the-Loop workflows, use /agent/query + /agent/approve instead.
     """
     try:
         # Build a new graph for each request to ensure a fresh state
-        graph = initialize_graph(session)
+        graph = await initialize_graph(session)
 
         # The user_id is now securely taken from the authenticated user
         user_id = current_user.user_id
@@ -478,23 +492,286 @@ async def google_auth_callback(
 ):
     """Handle OAuth callback from Google."""
     from src.auth.credentials_manager import CredentialsManager
-    
+
     try:
         user_id = state
         creds_manager = CredentialsManager(session)
-        
+
         credentials = await creds_manager.exchange_code_for_token(code, user_id)
-        
+
         logger.info(f"OAuth successful for user {user_id}")
-        
+
         return {
             "message": "Successfully connected Google Calendar",
             "user_id": user_id
         }
-    
+
     except Exception as e:
         logger.error(f"OAuth callback failed: {e}")
         raise HTTPException(status_code=500, detail="OAuth failed")
+
+
+# ==================== Settings/Constitution Endpoints ====================
+
+@app.get("/api/v1/settings", response_model=Settings)
+async def get_settings(
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session)
+):
+    """
+    Get user's scheduling rules and preferences (constitution).
+    Returns default constitution if user hasn't customized settings yet.
+    """
+    try:
+        from src.database.models import SchedulingRule
+
+        # Fetch all scheduling rules for the user
+        result = await session.execute(
+            select(SchedulingRule).where(SchedulingRule.user_id == current_user.user_id)
+        )
+        rules = result.scalars().all()
+
+        # If no rules exist, return default constitution
+        if not rules:
+            default_const = get_default_constitution()
+            return Settings(
+                user_id=current_user.user_id,
+                work_hours=WorkHours(
+                    start=default_const.get("work_hours", {}).get("start", "09:00"),
+                    end=default_const.get("work_hours", {}).get("end", "17:00"),
+                    timezone=current_user.timezone
+                ),
+                protected_time_blocks=[
+                    ProtectedTimeBlock(**block)
+                    for block in default_const.get("protected_times", [])
+                ],
+                scheduling_rules=SchedulingRules(
+                    no_weekend_meetings=default_const.get("rules", {}).get("protect_weekends", True),
+                    busyness_threshold=default_const.get("rules", {}).get("busy_threshold", 0.85),
+                    lookahead_days=default_const.get("rules", {}).get("lookahead_days", 14)
+                )
+            )
+
+        # Parse rules from database
+        work_hours_rule = next((r for r in rules if r.rule_type == "WORK_HOURS"), None)
+        protected_times_rule = next((r for r in rules if r.rule_type == "PROTECTED_TIME"), None)
+        general_rules = next((r for r in rules if r.rule_type == "GENERAL"), None)
+
+        work_hours_data = work_hours_rule.rule_definition if work_hours_rule else {"start": "09:00", "end": "17:00"}
+        protected_blocks_data = protected_times_rule.rule_definition if protected_times_rule else []
+        general_data = general_rules.rule_definition if general_rules else {}
+
+        return Settings(
+            user_id=current_user.user_id,
+            work_hours=WorkHours(
+                start=work_hours_data.get("start", "09:00"),
+                end=work_hours_data.get("end", "17:00"),
+                timezone=current_user.timezone
+            ),
+            protected_time_blocks=[
+                ProtectedTimeBlock(**block) for block in protected_blocks_data
+            ] if isinstance(protected_blocks_data, list) else [],
+            scheduling_rules=SchedulingRules(
+                no_weekend_meetings=general_data.get("no_weekend_meetings", True),
+                busyness_threshold=general_data.get("busyness_threshold", 0.85),
+                lookahead_days=general_data.get("lookahead_days", 14)
+            )
+        )
+
+    except Exception as e:
+        logger.exception("Failed to get settings")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/settings", response_model=SettingsUpdateResponse)
+async def update_settings(
+    settings_update: SettingsUpdateRequest,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session)
+):
+    """
+    Update user's scheduling rules and preferences.
+    Supports partial updates - only provided fields will be updated.
+    """
+    try:
+        from src.database.models import SchedulingRule
+        import uuid
+
+        # Update work hours if provided
+        if settings_update.work_hours:
+            result = await session.execute(
+                select(SchedulingRule).where(
+                    SchedulingRule.user_id == current_user.user_id,
+                    SchedulingRule.rule_type == "WORK_HOURS"
+                )
+            )
+            work_hours_rule = result.scalar_one_or_none()
+
+            if work_hours_rule:
+                work_hours_rule.rule_definition = {
+                    "start": settings_update.work_hours.start,
+                    "end": settings_update.work_hours.end
+                }
+            else:
+                new_rule = SchedulingRule(
+                    rule_id=str(uuid.uuid4()),
+                    user_id=current_user.user_id,
+                    rule_type="WORK_HOURS",
+                    rule_definition={
+                        "start": settings_update.work_hours.start,
+                        "end": settings_update.work_hours.end
+                    }
+                )
+                session.add(new_rule)
+
+        # Update protected time blocks if provided
+        if settings_update.protected_time_blocks is not None:
+            result = await session.execute(
+                select(SchedulingRule).where(
+                    SchedulingRule.user_id == current_user.user_id,
+                    SchedulingRule.rule_type == "PROTECTED_TIME"
+                )
+            )
+            protected_rule = result.scalar_one_or_none()
+
+            blocks_data = [block.model_dump() for block in settings_update.protected_time_blocks]
+
+            if protected_rule:
+                protected_rule.rule_definition = blocks_data
+            else:
+                new_rule = SchedulingRule(
+                    rule_id=str(uuid.uuid4()),
+                    user_id=current_user.user_id,
+                    rule_type="PROTECTED_TIME",
+                    rule_definition=blocks_data
+                )
+                session.add(new_rule)
+
+        # Update general scheduling rules if provided
+        if settings_update.scheduling_rules:
+            result = await session.execute(
+                select(SchedulingRule).where(
+                    SchedulingRule.user_id == current_user.user_id,
+                    SchedulingRule.rule_type == "GENERAL"
+                )
+            )
+            general_rule = result.scalar_one_or_none()
+
+            rules_data = settings_update.scheduling_rules.model_dump()
+
+            if general_rule:
+                general_rule.rule_definition = rules_data
+            else:
+                new_rule = SchedulingRule(
+                    rule_id=str(uuid.uuid4()),
+                    user_id=current_user.user_id,
+                    rule_type="GENERAL",
+                    rule_definition=rules_data
+                )
+                session.add(new_rule)
+
+        await session.commit()
+
+        return SettingsUpdateResponse(
+            message="Settings updated successfully",
+            updated_at=datetime.utcnow()
+        )
+
+    except Exception as e:
+        logger.exception("Failed to update settings")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== Google Account Management Endpoints ====================
+
+@app.get("/api/v1/auth/google/url", response_model=GoogleAuthUrlResponse)
+async def get_google_auth_url(
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session)
+):
+    """
+    Generate OAuth URL for connecting a new Google Calendar account.
+    The state parameter contains the user_id for callback verification.
+    """
+    try:
+        from src.auth.credentials_manager import CredentialsManager
+
+        creds_manager = CredentialsManager(session)
+        auth_url, state = creds_manager.get_authorization_url(state=current_user.user_id)
+
+        return GoogleAuthUrlResponse(auth_url=auth_url)
+
+    except Exception as e:
+        logger.exception("Failed to generate Google auth URL")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/auth/accounts", response_model=ConnectedAccountsResponse)
+async def get_connected_accounts(
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session)
+):
+    """
+    List all connected Google Calendar accounts for the authenticated user.
+    """
+    try:
+        from src.auth.credentials_manager import CredentialsManager
+
+        creds_manager = CredentialsManager(session)
+        token_records = await creds_manager.list_connected_accounts(current_user.user_id)
+
+        accounts = [
+            ConnectedAccount(
+                account_id=token.token_id,
+                email=token.account_email or current_user.email,
+                is_primary=token.is_primary or False,
+                connected_at=token.connected_at or datetime.utcnow(),
+                status=token.status or "active"
+            )
+            for token in token_records
+        ]
+
+        return ConnectedAccountsResponse(accounts=accounts)
+
+    except Exception as e:
+        logger.exception("Failed to list connected accounts")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/v1/auth/accounts/{account_id}", response_model=AccountDeleteResponse)
+async def remove_connected_account(
+    account_id: str,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session)
+):
+    """
+    Remove a connected Google Calendar account.
+    Revokes OAuth tokens and deletes from database.
+    Cannot delete if it's the user's only connected account.
+    """
+    try:
+        from src.auth.credentials_manager import CredentialsManager
+
+        creds_manager = CredentialsManager(session)
+
+        success = await creds_manager.revoke_account(current_user.user_id, account_id)
+
+        if not success:
+            raise HTTPException(status_code=404, detail="Account not found")
+
+        return AccountDeleteResponse(
+            message="Account disconnected successfully",
+            account_id=account_id
+        )
+
+    except ValueError as e:
+        # Cannot delete only account
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Failed to remove connected account")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":
